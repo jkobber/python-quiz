@@ -35,6 +35,7 @@ Perfect as a small party game, demo project, or learning example for WebSockets.
 ├── main.py          # FastAPI server + Web UI (single-file app)
 ├── questions.csv    # Quiz questions (CSV)
 └── README.md
+```
 📄 CSV Format (questions.csv)
 csv
 Copy code
