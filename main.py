@@ -114,6 +114,18 @@ def load_questions_from_csv(path: str) -> List[Question]:
 def make_room_code() -> str:
     return "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(5))
 
+def points_for_round(round_number_1_based: int) -> int:
+    if 1 <= round_number_1_based <= 4:
+        return 1
+    if 5 <= round_number_1_based <= 9:
+        return 2
+    if 10 <= round_number_1_based <= 20:
+        return 4
+    if 21 <= round_number_1_based <= 25:
+        return 6
+    if 26 <= round_number_1_based <= 30:
+        return 10
+    return 1
 
 def build_question_payload(q: Question) -> Dict:
     choices = q.wrong[:] + [q.correct]
@@ -130,11 +142,16 @@ def public_player_view(p: Player) -> Dict:
         "score": p.score,
         "connected": p.connected,
         "answered": p.selected_choice is not None,
+        "joker_5050": p.joker_5050,
+        "joker_spy": p.joker_spy,
+        "joker_risk": p.joker_risk,
     }
 
 
 def room_snapshot(room: RoomState) -> Dict:
     players_sorted = sorted(room.players.values(), key=lambda x: x.score, reverse=True)
+    current_round = max(0, room.question_index + 1)
+    q_points = points_for_round(current_round) if current_round > 0 else 0
     return {
         "code": room.code,
         "phase": room.phase,
@@ -150,6 +167,7 @@ def room_snapshot(room: RoomState) -> Dict:
             "choices": room.current_q["choices"],
         } if room.current_q and room.phase in ("question", "reveal") else None,
         "avatars": AVATARS,
+        "question_points": q_points,
     }
 
 
@@ -186,10 +204,29 @@ async def sleep_ms(ms: int):
 
 
 async def push_spy_updates(room: RoomState, only_to: Optional[Set[str]] = None):
-    def fmt_choice(i: Optional[int]) -> str:
-        if i is None:
-            return "—"
-        return chr(ord("A") + i)
+    # build picks_by_choice like reveal: {0: [{name,avatar,token}], 1: [...], ...}
+    picks_by_choice = {0: [], 1: [], 2: [], 3: []}
+    for p in room.players.values():
+        pick = room.live_picks.get(p.token)
+        if pick is None:
+            continue
+        picks_by_choice[pick].append({
+            "name": p.name,
+            "avatar": p.avatar,
+            "token": p.token,
+        })
+
+    spy_tokens = {p.token for p in room.players.values() if p.used_spy_this_q}
+    if only_to is not None:
+        spy_tokens = spy_tokens.intersection(only_to)
+    if not spy_tokens:
+        return
+
+    await broadcast_room(
+        room,
+        {"type": "spy:update", "picks_by_choice": picks_by_choice},
+        only_tokens=spy_tokens
+    )
 
     lines = []
     for p in room.players.values():
@@ -281,122 +318,378 @@ INDEX_HTML = """
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Quiz Multiplayer</title>
   <style>
-    body {
-      font-family: system-ui, sans-serif;
-      margin: 20px;
-      background:#0f1115;
-      color:#e6e6e6;
+    :root{
+      --bg:#0b0e14;
+      --panel:#111827;
+      --panel2:#0f172a;
+      --border:#243042;
+      --text:#e6e6e6;
+      --muted:#aab0bf;
+      --btn:#151f33;
+      --btnBorder:#2f3c52;
+      --accent:#7c3aed;  /* lila vibe */
+      --good:#3ddc84;
+      --warn:#ffd166;
     }
-    .row { display:flex; gap:16px; flex-wrap:wrap; }
-    .card {
-      border:1px solid #2a2f3a;
-      background:#151924;
-      border-radius: 12px;
-      padding: 12px;
-      min-width: 280px;
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      background: radial-gradient(1200px 600px at 50% 0%, rgba(124,58,237,0.25), transparent 60%), var(--bg);
+      color:var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     }
-    .btn {
-      padding: 8px 10px;
-      border-radius: 10px;
-      border:1px solid #3a4252;
-      background:#1c2230;
-      color:#e6e6e6;
-      cursor:pointer;
+
+    /* ---- App Layout ---- */
+    .app{
+      height:100vh;
+      display:flex;
+      flex-direction:column;
     }
-    .btn:hover { filter: brightness(1.08); }
-    .btn:disabled { opacity: 0.5; cursor:not-allowed; }
-    .muted { color:#aab0bf; font-size: 13px; }
-    .small { font-size: 12px; }
-    input, select {
-      padding: 6px;
-      border-radius: 8px;
-      border:1px solid #3a4252;
-      background:#0f1115;
-      color:#e6e6e6;
+
+    .topbar{
+      height:64px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding: 0 18px;
+      border-bottom:1px solid rgba(255,255,255,0.06);
+      background: linear-gradient(180deg, rgba(17,24,39,0.85), rgba(17,24,39,0.55));
+      backdrop-filter: blur(10px);
     }
-    .pill {
-      display:inline-block;
-      padding:2px 8px;
+    .brand{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      font-weight:800;
+      letter-spacing:0.3px;
+    }
+    .brand .logo{
+      width:38px; height:38px;
+      border-radius:12px;
+      background: rgba(124,58,237,0.25);
+      border:1px solid rgba(124,58,237,0.35);
+      display:flex; align-items:center; justify-content:center;
+      font-weight:900;
+      color:#d8c7ff;
+    }
+
+    .topbar-right{
+      display:flex;
+      align-items:center;
+      gap:10px;
+    }
+
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 8px 12px;
       border-radius: 999px;
-      border:1px solid #3a4252;
+      border:1px solid rgba(255,255,255,0.10);
+      background: rgba(15,23,42,0.65);
+      font-size: 12px;
+      color: var(--muted);
+      white-space:nowrap;
+    }
+    .pill strong{ color: var(--text); font-weight:700; }
+
+    .jokerbar{
+      display:flex;
+      align-items:center;
+      gap:10px;
+    }
+    .jokerbtn{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(15,23,42,0.45);
+      color: var(--text);
+      cursor:pointer;
+      font-weight:700;
+      font-size: 13px;
+    }
+    .jokerbtn:hover{ filter: brightness(1.08); }
+    .jokerbtn:disabled{
+      opacity:0.35;
+      cursor:not-allowed;
+      filter:none;
+    }
+
+    .main{
+      flex:1;
+      display:grid;
+      grid-template-columns: 320px 1fr 360px; /* left | game | scoreboard */
+      gap:16px;
+      padding: 16px;
+      overflow:hidden;
+    }
+
+    .panel{
+      border:1px solid rgba(255,255,255,0.08);
+      background: rgba(17,24,39,0.65);
+      backdrop-filter: blur(10px);
+      border-radius: 18px;
+      padding:14px;
+      overflow:hidden;
+      min-height:0;
+    }
+
+    /* Left connect panel */
+    .connect h3{ margin:0 0 10px 0; font-size:16px; }
+    .label{ font-size:12px; color: var(--muted); margin-top:10px; }
+    input, select{
+      width:100%;
+      margin-top:6px;
+      padding:10px 12px;
+      border-radius: 12px;
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(11,14,20,0.55);
+      color: var(--text);
+      outline:none;
+    }
+    .row{ display:flex; gap:10px; margin-top:12px; }
+    .btn{
+      flex:1;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(15,23,42,0.65);
+      color: var(--text);
+      cursor:pointer;
+      font-weight:700;
+    }
+    .btn:hover{ filter: brightness(1.08); }
+    .btn:disabled{ opacity:0.45; cursor:not-allowed; filter:none; }
+    .status{ margin-top:10px; color: var(--muted); font-size:13px; }
+
+    /* Center game */
+    .game{
+      display:flex;
+      flex-direction:column;
+      gap:14px;
+      min-width:0;
+    }
+    .gameheader{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .phase{
+      padding: 6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(15,23,42,0.55);
+      color: var(--muted);
       font-size:12px;
     }
-    .ok { border-color: #3ddc84; }
-    .bad { border-color: #ff5c5c; }
-    .choices button { display:block; width:100%; margin:6px 0; text-align:left; }
-    .correct { border-color:#3ddc84 !important; box-shadow: 0 0 0 1px rgba(61,220,132,0.25) inset; }
-    .closed { color:#ffd166; margin-top: 8px; }
+
+    .questionCard{
+      border:1px solid rgba(124,58,237,0.25);
+      background: rgba(15,23,42,0.55);
+      border-radius: 18px;
+      padding: 18px;
+      text-align:center;
+      font-size: 22px;
+      font-weight:800;
+      line-height:1.25;
+      min-height: 92px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    }
+
+    .answers{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:14px;
+    }
+
+    .answerBtn{
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(17,24,39,0.55);
+      padding: 16px;
+      text-align:left;
+      cursor:pointer;
+      color: var(--text);
+      font-weight:800;
+      min-height: 72px;
+      position:relative;
+      overflow:hidden;
+    }
+    .answerBtn:hover{ filter: brightness(1.07); }
+    .answerBtn:disabled{ opacity:0.35; cursor:not-allowed; filter:none; }
+    .answerBtn.correct{
+      border-color: rgba(61,220,132,0.9) !important;
+      box-shadow: 0 0 0 2px rgba(61,220,132,0.18) inset;
+    }
+    .pickedLine{
+      margin-top:10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight:600;
+    }
+    .closedInfo{
+      color: var(--warn);
+      font-weight:700;
+      margin-top: 2px;
+      font-size: 13px;
+    }
+
+    .hostbar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top: 4px;
+    }
+    .hostbar .btn{ flex:unset; min-width: 150px; }
+
+    /* Right scoreboard */
+    .scoreboard h3{ margin:0 0 10px 0; font-size:16px; }
+    .sbList{
+      list-style:none;
+      padding:0; margin:0;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      overflow:auto;
+      max-height: calc(100vh - 64px - 32px);
+    }
+    .sbItem{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border:1px solid rgba(255,255,255,0.10);
+      background: rgba(15,23,42,0.45);
+      cursor:pointer;
+    }
+    .sbLeft{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+    }
+    .sbAvatar{
+      width:34px; height:34px;
+      border-radius: 12px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background: rgba(124,58,237,0.18);
+      border:1px solid rgba(124,58,237,0.25);
+      font-size:18px;
+    }
+    .sbName{
+      font-weight:800;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      max-width: 170px;
+    }
+    .sbMeta{ color: var(--muted); font-size: 12px; }
+    .sbScore{ font-weight:900; }
+    .tag{
+      font-size:11px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border:1px solid rgba(255,255,255,0.12);
+      color: var(--muted);
+    }
+    .tag.ok{ border-color: rgba(61,220,132,0.45); color: rgba(61,220,132,0.95); }
+    .tag.bad{ border-color: rgba(255,92,92,0.45); color: rgba(255,92,92,0.95); }
   </style>
 </head>
 <body>
-  <h2>Quiz Multiplayer</h2>
+<div class="app">
 
-  <div class="row">
-    <div class="card">
-      <div><b>Verbinden</b></div>
-      <div style="margin-top:10px">
-        <div class="small muted">Name</div>
-        <input id="name" placeholder="Name" />
-      </div>
-      <div style="margin-top:10px">
-        <div class="small muted">Avatar</div>
-        <select id="avatar"></select>
-      </div>
-      <div style="margin-top:10px">
-        <div class="small muted">Room Code</div>
-        <input id="code" placeholder="z.B. ABC12" />
-      </div>
-      <div style="margin-top:12px" class="row">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">Q</div>
+      <div>Quiz Multiplayer</div>
+    </div>
+
+    <div class="jokerbar">
+      <button class="jokerbtn" id="j5050">🌓 50/50</button>
+      <button class="jokerbtn" id="jspy">🕵️ SPY</button>
+      <button class="jokerbtn" id="jrisk">🎲 RISK</button>
+    </div>
+
+    <div class="topbar-right">
+      <div class="pill"><strong id="roundPill">Round 0</strong></div>
+      <div class="pill"><strong id="pointsPill">0 Points</strong></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- Left: connect stays always -->
+    <div class="panel connect">
+      <h3>Verbinden</h3>
+
+      <div class="label">Name</div>
+      <input id="name" placeholder="Name" />
+
+      <div class="label">Avatar</div>
+      <select id="avatar"></select>
+
+      <div class="label">Room Code</div>
+      <input id="code" placeholder="z.B. ABC12" />
+
+      <div class="row">
         <button class="btn" id="create">Room erstellen</button>
         <button class="btn" id="join">Join</button>
       </div>
-      <div class="muted" style="margin-top:10px" id="status">nicht verbunden</div>
-      <div class="muted small" style="margin-top:8px">Reconnect: Token wird im Browser gespeichert.</div>
+
+      <div class="status" id="status">nicht verbunden</div>
+      <div class="status" style="font-size:12px;">Reconnect: Token wird im Browser gespeichert.</div>
+
+      <div style="margin-top:14px; color:var(--muted); font-size:12px;">
+        <div><b>Spy View</b></div>
+        <div id="spyview" style="margin-top:6px;"></div>
+      </div>
     </div>
 
-    <div class="card" style="flex:1; min-width: 340px;">
-      <div class="row" style="align-items:center; justify-content: space-between;">
-        <b>Spiel</b>
-        <span class="pill" id="phase">lobby</span>
+    <!-- Center: game -->
+    <div class="panel game">
+      <div class="gameheader">
+        <div class="phase" id="phase">lobby</div>
+        <div class="phase" id="timer"></div>
       </div>
 
-      <div id="question" style="margin-top:10px"></div>
-      <div class="choices" id="choices"></div>
+      <div class="questionCard" id="question">Warte auf Spielstart…</div>
 
-      <div id="closedInfo" class="closed"></div>
+      <div class="answers" id="choices"></div>
 
-      <div style="margin-top:10px" class="row">
-        <button class="btn" id="j5050">50/50</button>
-        <button class="btn" id="jspy">Spy</button>
-        <button class="btn" id="jrisk">Risk</button>
-      </div>
-      <div class="muted small" id="jokerInfo" style="margin-top:8px"></div>
+      <div class="closedInfo" id="closedInfo"></div>
 
-      <div style="margin-top:12px" class="row">
+      <div class="hostbar">
         <button class="btn" id="start">Start (Host)</button>
         <button class="btn" id="reveal">Auswerten (Host)</button>
         <button class="btn" id="next">Nächste Frage (Host)</button>
         <button class="btn" id="kick">Kick (Host)</button>
       </div>
 
-      <div class="muted small" style="margin-top:8px">
+      <div class="status" style="margin-top:4px;">
         Kick: Spieler im Scoreboard anklicken.
       </div>
-
-      <div class="muted" id="timer" style="margin-top:8px"></div>
-
-      <div style="margin-top:12px">
-        <b>Spy View</b>
-        <div class="muted small">Live Picks anderer Spieler (nur wenn Spy aktiv)</div>
-        <div id="spyview" class="small"></div>
-      </div>
     </div>
 
-    <div class="card" style="min-width: 320px;">
-      <div><b>Scoreboard</b></div>
-      <ul class="scoreboard" id="scoreboard"></ul>
+    <!-- Right: scoreboard -->
+    <div class="panel scoreboard">
+      <h3>Scoreboard</h3>
+      <ul class="sbList" id="scoreboard"></ul>
     </div>
   </div>
+
+</div>
 
 <script>
 let ws = null;
@@ -407,18 +700,19 @@ let hiddenIndices = new Set();
 let spyActive = false;
 let lastRoomCode = "";
 let lastQuestionIndex = -999;
+let spyPicks = null; // {0:[],1:[],2:[],3:[]}
 
-function qs(id) { return document.getElementById(id); }
-function setStatus(s) { qs("status").textContent = s; }
+function qs(id){ return document.getElementById(id); }
+function setStatus(s){ qs("status").textContent = s; }
 
-function wsUrl(code) {
+function wsUrl(code){
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws/${code}`;
 }
 
-function connect(code, isCreate) {
+function connect(code, isCreate){
   lastRoomCode = code;
-  if (ws) { try { ws.close(); } catch(e) {} }
+  if (ws){ try{ ws.close(); }catch(e){} }
   setStatus("verbinde...");
   ws = new WebSocket(wsUrl(code));
 
@@ -426,12 +720,7 @@ function connect(code, isCreate) {
     setStatus("verbunden");
     const name = (qs("name").value.trim() || (isCreate ? "Host" : "Player"));
     const avatar = qs("avatar").value;
-    ws.send(JSON.stringify({
-      type: "hello",
-      token: myToken,
-      name, avatar,
-      create: !!isCreate
-    }));
+    ws.send(JSON.stringify({ type:"hello", token: myToken, name, avatar, create: !!isCreate }));
   };
 
   ws.onclose = () => {
@@ -444,17 +733,17 @@ function connect(code, isCreate) {
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
 
-    if (msg.type === "hello:ok") {
+    if (msg.type === "hello:ok"){
       myToken = msg.token;
       localStorage.setItem("player_token", myToken);
       qs("code").value = msg.room_code;
-      lastRoomCode = msg.room_code; // wichtig nach create
+      lastRoomCode = msg.room_code;
     }
 
-    if (msg.type === "room:update") {
+    if (msg.type === "room:update"){
       room = msg.room;
 
-      if (room && room.question_index !== lastQuestionIndex) {
+      if (room && room.question_index !== lastQuestionIndex){
         lastQuestionIndex = room.question_index;
         hiddenIndices = new Set();
         spyActive = false;
@@ -466,72 +755,82 @@ function connect(code, isCreate) {
       render(room);
     }
 
-    if (msg.type === "tick") {
-      if (msg.deadline) {
+    if (msg.type === "tick"){
+      if (msg.deadline){
         const left = Math.max(0, Math.ceil(msg.deadline - msg.now));
-        qs("timer").textContent = "Zeit: " + left + "s";
+        qs("timer").textContent = left > 0 ? `⏱ ${left}s` : "";
       }
     }
 
-    if (msg.type === "joker:5050") {
+    if (msg.type === "joker:5050"){
       hiddenIndices = new Set(msg.hide_indices);
       render(room);
     }
 
     if (msg.type === "spy:update") {
       if (spyActive) {
-        qs("spyview").innerHTML = msg.lines.map(x => `<div>${x}</div>`).join("");
+        spyPicks = msg.picks_by_choice || null;
+        render(room);
       }
     }
 
-    if (msg.type === "error") {
+    if (msg.type === "error"){
       alert(msg.message);
     }
   };
 }
 
-function send(type, payload={}) {
+function send(type, payload={}){
   if (!ws || ws.readyState !== 1) return;
   ws.send(JSON.stringify(Object.assign({type}, payload)));
 }
 
-function choose(i) { send("answer:submit", { choice: i }); }
+function choose(i){ send("answer:submit", { choice: i }); }
 
-function selectKick(token) {
+function selectKick(token){
   selectedKickToken = token;
   qs("kick").textContent = "Kick (Host) → " + token.slice(0,8);
 }
 
-function render(r) {
+function getMe(r){
+  if (!r || !r.players) return null;
+  return r.players.find(p => p.token === myToken) || null;
+}
+
+function render(r){
   if (!r) return;
 
   qs("phase").textContent = r.phase;
 
-  qs("jokerInfo").textContent =
-    r.joker_used_this_q ? "Joker wurde diese Frage bereits genutzt." : "Diese Frage ist noch kein Joker genutzt.";
+  // round + points (simple: points = score of you; round = question_index+1)
+  const me = getMe(r);
+  qs("roundPill").textContent = `Round ${Math.max(0, r.question_index + 1)}`;
+  qs("pointsPill").textContent = `${r.question_points || 0} Points`;
 
-  if (r.phase === "question" && r.question_closed) {
+  // Joker grey-out after usage (per player + global lock + closed)
+  const canUseJokers = (r.phase === "question" && !r.question_closed && !r.joker_used_this_q);
+  qs("j5050").disabled = !(canUseJokers && me && me.joker_5050);
+  qs("jspy").disabled = !(canUseJokers && me && me.joker_spy);
+  qs("jrisk").disabled = !(canUseJokers && me && me.joker_risk);
+
+  // closed info
+  if (r.phase === "question" && r.question_closed){
     qs("closedInfo").textContent = "Antworten geschlossen – Host muss auswerten.";
   } else {
     qs("closedInfo").textContent = "";
   }
 
   const amHost = (r.host_token === myToken);
-
   qs("start").disabled = !amHost;
   qs("reveal").disabled = !(amHost && r.phase === "question" && r.question_closed);
   qs("next").disabled = !(amHost && r.phase === "reveal");
   qs("kick").disabled = !amHost || !selectedKickToken;
 
-  const canUseJokers = (r.phase === "question" && !r.question_closed && !r.joker_used_this_q);
-  qs("j5050").disabled = !canUseJokers;
-  qs("jspy").disabled = !canUseJokers;
-  qs("jrisk").disabled = !canUseJokers;
+  // question
+  if (r.current_q_public){
+    qs("question").textContent = r.current_q_public.text;
 
-  if (r.current_q_public) {
-    qs("question").innerHTML = `<b>Q${r.question_index+1}:</b> ${r.current_q_public.text}`;
     const choices = r.current_q_public.choices;
-
     const reveal = r.reveal_data; // correct_index + picks_by_choice
     const correctIndex = (reveal && typeof reveal.correct_index === "number") ? reveal.correct_index : null;
 
@@ -540,46 +839,63 @@ function render(r) {
       const disabled = (r.phase !== "question") || r.question_closed || hidden;
 
       const isCorrect = (r.phase === "reveal" && correctIndex === i);
-      const cls = isCorrect ? "btn correct" : "btn";
+      const cls = isCorrect ? "answerBtn correct" : "answerBtn";
 
       let picksHtml = "";
+
       if (r.phase === "reveal" && reveal && reveal.picks_by_choice) {
         const picks = reveal.picks_by_choice[i] || [];
         if (picks.length) {
           picksHtml =
-            "<div class='muted small' style='margin-top:6px'>" +
+            "<div class='pickedLine'>" +
+            picks.map(p => `${p.avatar} ${p.name}`).join(" • ") +
+            "</div>";
+        }
+      }
+      
+      if (r.phase === "question" && spyActive && spyPicks) {
+        const picks = spyPicks[i] || [];
+        if (picks.length) {
+          picksHtml =
+            "<div class='pickedLine'>" +
             picks.map(p => `${p.avatar} ${p.name}`).join(" • ") +
             "</div>";
         }
       }
 
-      const label = hidden ? "—" : (String.fromCharCode(65+i)+": "+c);
+      const label = hidden ? "—" : `${String.fromCharCode(65+i)}: ${c}`;
       return `<button class="${cls}" ${disabled ? "disabled":""} onclick="choose(${i})">${label}${picksHtml}</button>`;
     }).join("");
 
     qs("choices").innerHTML = html;
   } else {
-    qs("question").innerHTML = "<span class='muted'>Keine Frage (Lobby oder beendet)</span>";
+    qs("question").textContent = "Warte auf Spielstart…";
     qs("choices").innerHTML = "";
-    qs("timer").textContent = "";
   }
 
+  // scoreboard
   const sb = r.players.map(p => {
-    const pill = p.connected ? "ok" : "bad";
-    const ans = p.answered ? " • ✅" : "";
-    const me = (p.token === myToken) ? " <span class='pill'>du</span>" : "";
-    return `<li style="margin:6px 0">
-      <span style="cursor:pointer" onclick="selectKick('${p.token}')">
-        <span class="pill ${pill}">${p.avatar}</span>
-        <b>${p.name}</b> — ${p.score}${ans}${me}
-        <span class="muted small">(${p.token.slice(0,8)})</span>
-      </span>
-    </li>`;
+    const status = p.connected ? "ok" : "bad";
+    const ans = p.answered ? "✅" : "";
+    const you = (p.token === myToken) ? "du" : "";
+    return `
+      <li class="sbItem" onclick="selectKick('${p.token}')">
+        <div class="sbLeft">
+          <div class="sbAvatar">${p.avatar}</div>
+          <div style="min-width:0">
+            <div class="sbName">${p.name}</div>
+            <div class="sbMeta">${ans} <span class="tag ${status}">${p.connected ? "online" : "offline"}</span> ${you ? `<span class="tag">${you}</span>` : ""}</div>
+          </div>
+        </div>
+        <div class="sbScore">${p.score}</div>
+      </li>
+    `;
   }).join("");
 
   qs("scoreboard").innerHTML = sb;
 }
 
+// Buttons
 qs("create").onclick = () => connect("NEW", true);
 qs("join").onclick = () => {
   const code = (qs("code").value.trim() || "").toUpperCase();
@@ -599,7 +915,7 @@ qs("j5050").onclick = () => send("joker:5050", {});
 qs("jspy").onclick = () => { spyActive = true; send("joker:spy", {}); };
 qs("jrisk").onclick = () => send("joker:risk", {});
 
-// avatars injected below
+// init avatars
 const sel = qs("avatar");
 const AVATARS = __AVATARS__;
 AVATARS.forEach(a => {
@@ -612,6 +928,7 @@ sel.value = sel.options[0].value;
 </body>
 </html>
 """.replace("__AVATARS__", json.dumps(AVATARS, ensure_ascii=False))
+
 
 
 
@@ -772,21 +1089,23 @@ async def ws_room(ws: WebSocket, room_code: str):
                         })
 
                 correct_index = room.current_q["correct_index"]
+                round_no = room.question_index + 1
+                q_points = points_for_round(round_no)
 
                 # scoring happens once, here
                 for p in room.players.values():
-                    if p.selected_choice is None:
-                        continue
-                    is_correct = (p.selected_choice == correct_index)
+                  if p.selected_choice is None:
+                      continue
+                  is_correct = (p.selected_choice == correct_index)
 
-                    if p.used_risk_this_q:
-                        if is_correct:
-                            p.score += 2 * POINTS_PER_QUESTION
-                        else:
-                            p.score -= POINTS_PER_QUESTION
-                    else:
-                        if is_correct:
-                            p.score += POINTS_PER_QUESTION
+                  if p.used_risk_this_q:
+                      if is_correct:
+                          p.score += 2 * q_points
+                      else:
+                          p.score -= q_points
+                  else:
+                      if is_correct:
+                          p.score += q_points
 
                 room.phase = "reveal"
                 room.reveal_data = {
