@@ -50,25 +50,27 @@ Up to 30 questions are used per game
 
 🚀 Setup & Run (Local)
 1) Create & activate virtual environment
-bash
-Copy code
+```pwsh
 python -m venv venv
+```
 # Windows
+```pwsh
 venv\Scripts\activate
+```
 # Linux / macOS
 source venv/bin/activate
 2) Install dependencies
-bash
-Copy code
+```bash
 pip install fastapi "uvicorn[standard]"
+```
 3) Start the server
-bash
-Copy code
+```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
 4) Open in browser
-text
-Copy code
+```text
 http://localhost:8000
+```
 Open multiple tabs or devices to test multiplayer.
 
 🌐 Deploy Behind Nginx (WebSockets Ready)
@@ -76,8 +78,7 @@ FastAPI runs internally (e.g. 127.0.0.1:8000), Nginx exposes it publicly.
 
 Minimal Nginx config:
 
-nginx
-Copy code
+```nginx
 map $http_upgrade $connection_upgrade {
     default upgrade;
     '' close;
@@ -96,6 +97,7 @@ server {
         proxy_read_timeout 3600;
     }
 }
+```
 With HTTPS (Let’s Encrypt), WebSockets automatically upgrade to wss://.
 
 🧠 Notes
