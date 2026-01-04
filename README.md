@@ -114,7 +114,7 @@ With HTTPS (Let’s Encrypt), WebSockets automatically upgrade to wss://.
 - FastAPI
 - Uvicorn
 - WebSockets
-# Vanilla HTML / CSS / JS (no frontend framework)
+- Vanilla HTML / CSS / JS (no frontend framework)
 
 ## 📜 License
 MIT — do whatever you want, have fun 🎉
