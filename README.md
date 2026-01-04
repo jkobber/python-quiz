@@ -73,7 +73,7 @@ http://localhost:8000
 ```
 Open multiple tabs or devices to test multiplayer.
 
-🌐 Deploy Behind Nginx (WebSockets Ready)
+## 🌐 Deploy Behind Nginx (WebSockets Ready)
 FastAPI runs internally (e.g. 127.0.0.1:8000), Nginx exposes it publicly.
 
 Minimal Nginx config:
@@ -100,31 +100,21 @@ server {
 ```
 With HTTPS (Let’s Encrypt), WebSockets automatically upgrade to wss://.
 
-🧠 Notes
-Game state is stored in memory (perfect for small games / parties)
+## 🧠 Notes
+- Game state is stored in memory (perfect for small games / parties)
+- Restarting the server resets all rooms
+- Designed as a clean MVP — easy to extend with:
+ - Database (Redis/Postgres)
+ - Auth / user accounts
+ - Question editor
+ - Mobile / desktop clients
 
-Restarting the server resets all rooms
+## 🛠️ Tech Stack
+- Python 3.10+
+- FastAPI
+- Uvicorn
+- WebSockets
+# Vanilla HTML / CSS / JS (no frontend framework)
 
-Designed as a clean MVP — easy to extend with:
-
-Database (Redis/Postgres)
-
-Auth / user accounts
-
-Question editor
-
-Mobile / desktop clients
-
-🛠️ Tech Stack
-Python 3.10+
-
-FastAPI
-
-Uvicorn
-
-WebSockets
-
-Vanilla HTML / CSS / JS (no frontend framework)
-
-📜 License
+## 📜 License
 MIT — do whatever you want, have fun 🎉
