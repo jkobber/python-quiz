@@ -55,7 +55,7 @@ python -m venv venv
 ```
 # Windows
 ```pwsh
-venv\Scripts\activate
+.\venv\Scripts\Activate.ps1
 ```
 # Linux / macOS
 source venv/bin/activate
